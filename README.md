@@ -118,10 +118,20 @@ If the scale sends no impedance (shoes on, dry feet), you get weight only.
 **Options** (Configure): add/remove people; *read stored measurements* (off by
 default) which replays measurements the scale kept while Home Assistant was out
 of range as `huawei_scale3_measurement` events with `history: true`
-(they do not overwrite the sensors); and the cool-down.
+(they do not overwrite the sensors); the cool-down; and *Bind an unbound scale*
+(off by default, experimental, see below).
 
 ## Troubleshooting
 
+* **The scale authenticates but never measures; the log says "Scale returned
+  status 01 for user profile" and the manager info is empty.** A scale that was
+  never paired with the Huawei Health app has no owner (a *manager*), and then
+  refuses the profile and the realtime subscription. *Configure → Behaviour →
+  Bind an unbound scale (experimental)* makes the integration write a made-up
+  owner ID (`openscale:` plus the scale's address) to it, as the app does when
+  pairing. This is untested on real hardware. The owner stays on the scale until
+  it is factory-reset, and Huawei Health may then be unable to pair with it, so
+  leave it off if you also use that app.
 * **Nothing happens when I step on the scale.** Check the **Status** sensor and
   the Bluetooth integration's *Advertisement monitor* for the scale. A local
   adapter/proxy must be within range *and* allow active connections.

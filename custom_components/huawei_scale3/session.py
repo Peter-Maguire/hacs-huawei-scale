@@ -43,6 +43,8 @@ MEASUREMENT_TIMEOUT = MAX_STATUS_POLLS * STATUS_POLL_INTERVAL + FINAL_REQUEST_GR
 
 CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
 SYNTHETIC_HUID_PREFIX = "openscale:"  # same format the openScale driver uses
+BIND_DEVICE_ID_PREFIX = "homeassistant:"
+BIND_ACK_TIMEOUT = 5.0
 
 _STREAM_KINDS = frozenset({"realtime", "status", "history"})
 _DISCONNECTED = "disconnected"
@@ -97,6 +99,7 @@ class Scale3Session:
         user: ScaleUser,
         *,
         read_history: bool = False,
+        bind_if_unbound: bool = False,
         metric: bool = True,
         random_bytes: Callable[[int], bytes] = os.urandom,
         now: Callable[[], datetime] = datetime.now,
@@ -109,6 +112,7 @@ class Scale3Session:
         self._secrets = secrets
         self._user = user
         self._read_history = read_history
+        self._bind_if_unbound = bind_if_unbound
         self._metric = metric
         self._random = random_bytes
         self._now = now
@@ -121,6 +125,7 @@ class Scale3Session:
         self._inbox: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
         self._backlog: deque[tuple[str, bytes]] = deque()
         self._manager_huid: str | None = None
+        self._scale_unbound = False
         self._deferred: list[tuple[str, str, str]] = []
         self._seen: dict[str, int] = {}
         self._last_status: int | None = None
@@ -302,6 +307,9 @@ class Scale3Session:
             info = p.parse_manager_info(payload)
             if info and info.huid:
                 self._manager_huid = info.huid
+                self._scale_unbound = False
+            elif info is not None:
+                self._scale_unbound = True  # the scale has no manager (HUID) yet
         elif kind == "weight_unit":
             unit = p.parse_weight_unit(payload)
             if unit:
@@ -384,10 +392,11 @@ class Scale3Session:
                 _LOGGER.debug("Manager info timed out; using a local HUID")
 
         assert self._work_key is not None
+        if self._scale_unbound:
+            await self._bind_scale()
         user = self._user
         user_info = p.build_user_info_payload(
-            huid=self._manager_huid
-            or SYNTHETIC_HUID_PREFIX + self._address.replace(":", "").upper(),
+            huid=self._manager_huid or self._synthetic_huid,
             uid=f"u:{user.user_id:08X}",
             # Scale 3 uses male=1 / female=0 (the other Hagrid scales are inverted).
             gender=1 if user.male else 0,
@@ -403,6 +412,46 @@ class Scale3Session:
                     _LOGGER.warning("Scale returned status %s for user profile", ack[:1].hex())
             except TimeoutError:
                 _LOGGER.debug("Set-user-info ack timed out; continuing")
+
+    @property
+    def _synthetic_huid(self) -> str:
+        return SYNTHETIC_HUID_PREFIX + self._address.replace(":", "").upper()
+
+    async def _bind_scale(self) -> None:
+        """Give an unbound scale a manager, as the Huawei app does when pairing.
+
+        An unbound scale (empty manager info) answers the user profile with
+        status 01 and refuses the realtime subscription, so it never measures.
+        Only done when the user opted in, since it changes the scale's state.
+        """
+        if not self._bind_if_unbound:
+            _LOGGER.warning(
+                "The scale has no manager (it looks unbound) and may not measure; "
+                "enable 'Bind an unbound scale' in the integration options to try binding it"
+            )
+            return
+        assert self._work_key is not None
+        huid = self._synthetic_huid
+        payload = p.build_manager_info_payload(
+            huid, BIND_DEVICE_ID_PREFIX + self._address.replace(":", "").upper()
+        )
+        frames = p.build_encrypted_write_frames(payload, self._work_key, self._random(16))
+        _LOGGER.info("Binding the unbound scale to manager %s", huid)
+        if not await self._write(
+            p.SVC_USER_DATA, p.CHR_SET_MANAGER_INFO, b"", encrypted_frames=frames
+        ):
+            return
+        try:
+            ack = await self._expect("set_manager_info", BIND_ACK_TIMEOUT)
+        except TimeoutError:
+            _LOGGER.warning("The scale did not acknowledge being bound")
+            return
+        _LOGGER.debug("Set-manager-info ack: %s", ack.hex())
+        if ack[:1] != b"\x00":
+            _LOGGER.warning("Scale returned status %s for the bind request", ack[:1].hex())
+            return
+        self._manager_huid = huid
+        self._scale_unbound = False
 
     async def _measure(self) -> None:
         loop = asyncio.get_running_loop()

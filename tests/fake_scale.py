@@ -80,6 +80,7 @@ class FakeScale:
         answer_auth: bool = True,
         work_key_reply_encrypted: bool = True,
         with_gatt: bool = True,
+        unbound: bool = False,
     ) -> None:
         self.address = address
         self.secrets = secrets
@@ -93,6 +94,8 @@ class FakeScale:
 
         self.work_key: bytes | None = None
         self.user_info: bytes | None = None
+        self.unbound = unbound  # no manager until SET_MANAGER_INFO is written
+        self.manager_info: bytes | None = None
         self.clock: bytes | None = None
         self.weight_unit: bytes | None = None
         self.polls = 0
@@ -182,12 +185,21 @@ class FakeScale:
         elif uuid == p.CHR_SET_WEIGHT_UNIT:
             self.weight_unit = payload
         elif uuid == p.CHR_GET_MANAGER_INFO:
-            self._notify(
-                uuid, b"HUID-FROM-SCALE".ljust(30, b"\x00") + b"DEVICE-1".ljust(40, b"\x00")
-            )
+            if self.manager_info is not None:
+                self._notify(uuid, self.manager_info)
+            elif self.unbound:
+                self._notify(uuid, b"")
+            else:
+                self._notify(
+                    uuid, b"HUID-FROM-SCALE".ljust(30, b"\x00") + b"DEVICE-1".ljust(40, b"\x00")
+                )
+        elif uuid == p.CHR_SET_MANAGER_INFO:
+            self.manager_info = payload
+            self._notify(uuid, b"\x00", encrypted=True)
         elif uuid == p.CHR_SET_USER_INFO:
             self.user_info = payload
-            self._notify(uuid, b"\x00", encrypted=True)
+            unbound = self.unbound and self.manager_info is None
+            self._notify(uuid, b"\x01" if unbound else b"\x00", encrypted=True)
         elif uuid == p.CHR_REALTIME_WEIGHT:
             if self.status_ready_after == 0 or self.polls >= self.status_ready_after:
                 self._notify(uuid, self.realtime, encrypted=True)

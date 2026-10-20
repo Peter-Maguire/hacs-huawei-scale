@@ -16,7 +16,8 @@ USER = s.ScaleUser(user_id=7, male=True, age=46, height_cm=178, weight_kg=91.4)
 
 
 async def go(
-    scale: FakeScale, *, secrets=SECRETS, read_history=False, user=USER, metric=True, before=None
+    scale: FakeScale, *, secrets=SECRETS, read_history=False, user=USER, metric=True, before=None,
+    bind_if_unbound=False,
 ):
     """Run a session to completion. Raises whatever the session raises."""
     out = SimpleNamespace(states=[], measurements=[], info={}, session=None)
@@ -28,6 +29,7 @@ async def go(
             secrets,
             user,
             read_history=read_history,
+            bind_if_unbound=bind_if_unbound,
             metric=metric,
             now=lambda: datetime(2026, 8, 10, 7, 5, 9),
             on_state=out.states.append,
@@ -255,3 +257,29 @@ async def test_refused_subscription_is_retried_later() -> None:
     client.allow()
     await session._retry_deferred_subscriptions()
     assert session._deferred == [] and client.subscribed == [uuid]
+
+
+async def test_unbound_scale_is_left_alone_unless_binding_is_enabled():
+    scale = FakeScale(ADDRESS, SECRETS, unbound=True)
+    await go(scale)
+    assert scale.manager_info is None
+    assert scale.user_info[:30].rstrip(b"\x00") == b"openscale:381EC76608D3"
+
+
+async def test_unbound_scale_is_bound_when_enabled():
+    scale = FakeScale(ADDRESS, SECRETS, unbound=True)
+    out = await go(scale, bind_if_unbound=True)
+
+    info = scale.manager_info
+    assert info is not None and len(info) == 70
+    assert info[:30].rstrip(b"\x00") == b"openscale:381EC76608D3"
+    assert info[30:].rstrip(b"\x00") == b"homeassistant:381EC76608D3"
+    # The profile that follows uses the new manager's HUID and is accepted.
+    assert scale.user_info[:30] == info[:30]
+    assert len(out.measurements) == 1
+
+
+async def test_bound_scale_is_never_rebound():
+    scale = FakeScale(ADDRESS, SECRETS)
+    await go(scale, bind_if_unbound=True)
+    assert scale.manager_info is None
