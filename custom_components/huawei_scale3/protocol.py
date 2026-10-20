@@ -54,7 +54,6 @@ CHR_SEND_WORK_KEY = "a3d330f8-b84f-4f48-a78c-f8d1e33b597a"
 CHR_BIND_REQUEST = "42596cbe-d291-4da3-8ca6-d1ae5d1c9174"
 CHR_SET_USER_INFO = "8cc61d7d-66c0-4802-89c3-38c5a163592e"
 CHR_GET_MANAGER_INFO = "4338c65e-ed8e-4085-bbea-a25e33ca6b54"
-CHR_SET_MANAGER_INFO = "3a3a7d71-37f6-4b94-b44a-21ac1916ac4f"
 CHR_CURRENT_TIME = uuid16(0x2A2B)
 CHR_PRODUCT_INFO = "75143e79-f878-4a00-a628-edc40509de7e"
 CHR_SCALE_VERSION = "1f5d3d5c-496d-4290-af03-c7a8d5419741"
@@ -87,7 +86,6 @@ NOTIFY_CHARACTERISTICS: tuple[tuple[str, str, str], ...] = (
     (SVC_USER_DATA, CHR_BIND_REQUEST, "realtime"),
     (SVC_USER_DATA, CHR_SET_USER_INFO, "set_user_info"),
     (SVC_USER_DATA, CHR_GET_MANAGER_INFO, "manager_info"),
-    (SVC_USER_DATA, CHR_SET_MANAGER_INFO, "set_manager_info"),
     (SVC_CURRENT_TIME, CHR_CURRENT_TIME, "time"),
     (SVC_CURRENT_TIME, CHR_PRODUCT_INFO, "product_info"),
     (SVC_CURRENT_TIME, CHR_SCALE_VERSION, "scale_version"),
@@ -118,7 +116,6 @@ SIMPLE_CHUNK_BYTES = 15
 USER_INFO_PAYLOAD_BYTES = 69
 MANAGER_HUID_BYTES = 30
 MANAGER_DEVICE_ID_BYTES = 40
-MANAGER_INFO_PAYLOAD_BYTES = MANAGER_HUID_BYTES + MANAGER_DEVICE_ID_BYTES
 
 AUTH_TOKEN_SUFFIX_TO_SCALE = b"1123"
 AUTH_TOKEN_SUFFIX_FROM_SCALE = b"9856"
@@ -389,21 +386,6 @@ def build_user_info_payload(
     centi_kg = int(round(weight_kg * 100)) if weight_kg and weight_kg > 0 else 0
     payload[66:68] = max(0, min(0xFFFF, centi_kg)).to_bytes(2, "little")
     payload[68] = max(0, min(255, user_type))
-    return bytes(payload)
-
-
-def build_bind_request_payload(huid: str) -> bytes:
-    """30-byte BIND_REQUEST payload: the HUID of the account the scale is bound to."""
-    payload = bytearray(MANAGER_HUID_BYTES)
-    _put_fixed(payload, huid, 0, MANAGER_HUID_BYTES)
-    return bytes(payload)
-
-
-def build_manager_info_payload(huid: str, device_id: str) -> bytes:
-    """70-byte SET_MANAGER_INFO payload (HUID, then device id) that binds a scale."""
-    payload = bytearray(MANAGER_INFO_PAYLOAD_BYTES)
-    _put_fixed(payload, huid, 0, MANAGER_HUID_BYTES)
-    _put_fixed(payload, device_id, MANAGER_HUID_BYTES, MANAGER_DEVICE_ID_BYTES)
     return bytes(payload)
 
 

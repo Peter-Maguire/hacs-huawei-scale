@@ -41,12 +41,28 @@ MAX_HISTORY_RECORDS = 64
 #: Upper bound for the weighing itself (the scale needs ~20-25 s).
 MEASUREMENT_TIMEOUT = MAX_STATUS_POLLS * STATUS_POLL_INTERVAL + FINAL_REQUEST_GRACE
 
-CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
 SYNTHETIC_HUID_PREFIX = "openscale:"  # same format the openScale driver uses
-BIND_DEVICE_ID_PREFIX = "homeassistant:"
-BIND_ACK_TIMEOUT = 5.0
 
 _STREAM_KINDS = frozenset({"realtime", "status", "history"})
+
+_NOTIFY_BY_CHARACTERISTIC = {
+    char: (service, kind) for service, char, kind in p.NOTIFY_CHARACTERISTICS
+}
+#: Subscriptions per phase, most important first. The proxy limit applies to
+#: what is subscribed at the same time, so each phase replaces the previous one.
+_PHASE_AUTH = (p.CHR_REQUEST_AUTH, p.CHR_AUTH_TOKEN, p.CHR_SEND_WORK_KEY)
+_PHASE_SYNC = (p.CHR_CURRENT_TIME, p.CHR_GET_MANAGER_INFO, p.CHR_SET_USER_INFO)
+_PHASE_MEASURE = (
+    p.CHR_REALTIME_WEIGHT,
+    p.CHR_STATUS_POLL,
+    p.CHR_STATUS_RESULT,
+    p.CHR_BODY_COMPOSITION_MEASUREMENT,
+    p.CHR_WEIGHT_MEASUREMENT,
+    p.CHR_BIND_REQUEST,
+    p.CHR_PRODUCT_INFO,
+    p.CHR_SCALE_VERSION,
+)
+_PHASE_HISTORY = (p.CHR_HISTORY_WEIGHT,)
 _DISCONNECTED = "disconnected"
 
 
@@ -99,7 +115,6 @@ class Scale3Session:
         user: ScaleUser,
         *,
         read_history: bool = False,
-        bind_if_unbound: bool = False,
         metric: bool = True,
         random_bytes: Callable[[int], bytes] = os.urandom,
         now: Callable[[], datetime] = datetime.now,
@@ -112,7 +127,6 @@ class Scale3Session:
         self._secrets = secrets
         self._user = user
         self._read_history = read_history
-        self._bind_if_unbound = bind_if_unbound
         self._metric = metric
         self._random = random_bytes
         self._now = now
@@ -125,8 +139,7 @@ class Scale3Session:
         self._inbox: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
         self._backlog: deque[tuple[str, bytes]] = deque()
         self._manager_huid: str | None = None
-        self._scale_unbound = False
-        self._deferred: list[tuple[str, str, str]] = []
+        self._active: dict[str, Any] = {}
         self._seen: dict[str, int] = {}
         self._last_status: int | None = None
         self.measurement_published = False
@@ -145,32 +158,30 @@ class Scale3Session:
         except Exception:  # noqa: BLE001 - bleak raises different errors per backend
             return None
 
-    async def _subscribe(self) -> None:
-        subscribed = 0
-        for service, characteristic, kind in p.NOTIFY_CHARACTERISTICS:
-            if self._characteristic(service, characteristic) is None:
-                continue
-            if await self._start_notify(service, characteristic, kind):
-                subscribed += 1
-            else:
-                # The scale may refuse some subscriptions (GATT error 128) until
-                # it is in the right state; the app subscribes just before it
-                # writes to the characteristic, so try again at that point.
-                self._deferred.append((service, characteristic, kind))
-        if not subscribed or self._characteristic(p.SVC_USER_DATA, p.CHR_REQUEST_AUTH) is None:
-            raise SessionError(
-                "device does not expose the Huawei Hagrid GATT layout "
-                "(is this really a Huawei Scale 3?)"
-            )
+    async def _subscribe(self, wanted: tuple[str, ...]) -> None:
+        """Make ``wanted`` (characteristic UUIDs) the active subscriptions.
 
-    async def _start_notify(self, service: str, characteristic: str, kind: str) -> bool:
-        """Subscribe to one characteristic. Raises only for the auth ones."""
-        char = self._characteristic(service, characteristic)
+        ESPHome Bluetooth proxies (and some adapters) only hold about a dozen
+        notification subscriptions per connection and refuse the rest with
+        GATT error 128, so the session subscribes in phases (see ``_PHASE_*``)
+        and drops what it no longer needs instead of subscribing to everything
+        up front.
+        """
+        for uuid in list(self._active):
+            if uuid not in wanted:
+                await self._stop_notify(uuid)
+        for uuid in wanted:
+            if uuid not in self._active:
+                await self._start_notify(uuid)
+
+    async def _start_notify(self, uuid: str) -> None:
+        service, kind = _NOTIFY_BY_CHARACTERISTIC[uuid]
+        char = self._characteristic(service, uuid)
         if char is None:
-            return False
+            return
 
         def _callback(_sender: Any, data: bytearray, _kind: str = kind,
-                      _uuid: str = characteristic) -> None:
+                      _uuid: str = uuid) -> None:
             self._on_notify(_uuid, _kind, bytes(data))
 
         required = kind in ("request_auth", "auth_token", "send_work_key")
@@ -180,56 +191,28 @@ class Scale3Session:
         for attempt in range(1, attempts + 1):
             try:
                 await self._client.start_notify(char, _callback)
-                break
             except Exception as err:  # noqa: BLE001
                 if attempt < attempts:
-                    _LOGGER.debug("Subscribing to %s failed (%s); retrying", characteristic, err)
+                    _LOGGER.debug("Subscribing to %s failed (%s); retrying", uuid, err)
                     await asyncio.sleep(SUBSCRIBE_RETRY_DELAY)
                     continue
-                # Optional characteristics must not abort the session.
                 if required:
                     raise SessionError(f"cannot subscribe to {kind}: {err}") from err
-                _LOGGER.debug("Cannot subscribe to %s: %s", characteristic, err)
-                return False
-        await self._prefer_indication(char, characteristic)
-        return True
-
-    async def _retry_deferred_subscriptions(self) -> None:
-        """Retry the subscriptions the scale refused earlier."""
-        still_failing = []
-        for service, characteristic, kind in self._deferred:
-            if await self._start_notify(service, characteristic, kind):
-                _LOGGER.debug("Subscribed to %s on retry", characteristic)
-            else:
-                still_failing.append((service, characteristic, kind))
-        self._deferred = still_failing
-
-    async def _prefer_indication(self, char: Any, uuid: str) -> None:
-        """Switch an indicate-only characteristic from notify to indicate.
-
-        ``start_notify`` on some backends (notably ESPHome Bluetooth proxies)
-        always writes the *notify* bit of the CCCD. The Huawei app writes the
-        *indicate* bit, and the scale's indicate-only characteristics (the SIG
-        weight / body-composition measurements) then never deliver anything.
-        The notification callback registered by ``start_notify`` stays in place.
-        """
-        properties = {str(prop).lower() for prop in getattr(char, "properties", ())}
-        _LOGGER.debug("Characteristic %s properties: %s", uuid, sorted(properties))
-        if "indicate" not in properties or "notify" in properties:
+                # Optional characteristics must not abort the session.
+                level = logging.WARNING if uuid == p.CHR_REALTIME_WEIGHT else logging.DEBUG
+                _LOGGER.log(level, "Cannot subscribe to %s: %s", uuid, err)
+                return
+            self._active[uuid] = char
             return
-        cccd = None
-        try:
-            cccd = char.get_descriptor(CCCD_UUID)
-        except Exception:  # noqa: BLE001 - backends differ
-            pass
-        if cccd is None:
+
+    async def _stop_notify(self, uuid: str) -> None:
+        char = self._active.pop(uuid, None)
+        if char is None:
             return
         try:
-            await self._client.write_gatt_descriptor(cccd, b"\x02\x00")
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Could not enable indications on %s: %s", uuid, err)
-        else:
-            _LOGGER.debug("Enabled indications on %s", uuid)
+            await self._client.stop_notify(char)
+        except Exception as err:  # noqa: BLE001 - best effort, the link may be going away
+            _LOGGER.debug("Could not unsubscribe from %s: %s", uuid, err)
 
     def _on_notify(self, uuid: str, kind: str, data: bytes) -> None:
         if not p.has_notification_prefix(data):
@@ -307,9 +290,6 @@ class Scale3Session:
             info = p.parse_manager_info(payload)
             if info and info.huid:
                 self._manager_huid = info.huid
-                self._scale_unbound = False
-            elif info is not None:
-                self._scale_unbound = True  # the scale has no manager (HUID) yet
         elif kind == "weight_unit":
             unit = p.parse_weight_unit(payload)
             if unit:
@@ -320,14 +300,22 @@ class Scale3Session:
     # ----------------------------------------------------------------- flow
 
     async def run(self) -> None:
-        await self._subscribe()
+        await self._subscribe(_PHASE_AUTH)
+        if not self._active or self._characteristic(p.SVC_USER_DATA, p.CHR_REQUEST_AUTH) is None:
+            raise SessionError(
+                "device does not expose the Huawei Hagrid GATT layout "
+                "(is this really a Huawei Scale 3?)"
+            )
         self._on_state("authenticating")
         await self._authenticate()
+        await self._subscribe(_PHASE_SYNC)
         self._on_state("syncing")
         await self._sync_clock_and_profile()
+        await self._subscribe(_PHASE_MEASURE)
         self._on_state("measuring")
         await self._measure()
         if self._read_history:
+            await self._subscribe(_PHASE_HISTORY)
             self._on_state("reading_history")
             await self._drain_history()
 
@@ -392,11 +380,10 @@ class Scale3Session:
                 _LOGGER.debug("Manager info timed out; using a local HUID")
 
         assert self._work_key is not None
-        if self._scale_unbound:
-            await self._bind_scale()
         user = self._user
         user_info = p.build_user_info_payload(
-            huid=self._manager_huid or self._synthetic_huid,
+            huid=self._manager_huid
+            or SYNTHETIC_HUID_PREFIX + self._address.replace(":", "").upper(),
             uid=f"u:{user.user_id:08X}",
             # Scale 3 uses male=1 / female=0 (the other Hagrid scales are inverted).
             gender=1 if user.male else 0,
@@ -413,59 +400,8 @@ class Scale3Session:
             except TimeoutError:
                 _LOGGER.debug("Set-user-info ack timed out; continuing")
 
-    @property
-    def _synthetic_huid(self) -> str:
-        return SYNTHETIC_HUID_PREFIX + self._address.replace(":", "").upper()
-
-    async def _bind_scale(self) -> None:
-        """Give an unbound scale a manager, as the Huawei app does when pairing.
-
-        Sends BIND_REQUEST (the account HUID) first, then SET_MANAGER_INFO.
-        Whatever the scale answers on the bind characteristic arrives as a
-        "realtime" message and is logged.
-
-        An unbound scale (empty manager info) answers the user profile with
-        status 01 and refuses the realtime subscription, so it never measures.
-        Only done when the user opted in, since it changes the scale's state.
-        """
-        if not self._bind_if_unbound:
-            _LOGGER.warning(
-                "The scale has no manager (it looks unbound) and may not measure; "
-                "enable 'Bind an unbound scale' in the integration options to try binding it"
-            )
-            return
-        assert self._work_key is not None
-        huid = self._synthetic_huid
-        payload = p.build_manager_info_payload(
-            huid, BIND_DEVICE_ID_PREFIX + self._address.replace(":", "").upper()
-        )
-        _LOGGER.info("Binding the unbound scale to manager %s", huid)
-        bind_frames = p.build_encrypted_write_frames(
-            p.build_bind_request_payload(huid), self._work_key, self._random(16)
-        )
-        await self._write(
-            p.SVC_USER_DATA, p.CHR_BIND_REQUEST, b"", encrypted_frames=bind_frames
-        )
-        frames = p.build_encrypted_write_frames(payload, self._work_key, self._random(16))
-        if not await self._write(
-            p.SVC_USER_DATA, p.CHR_SET_MANAGER_INFO, b"", encrypted_frames=frames
-        ):
-            return
-        try:
-            ack = await self._expect("set_manager_info", BIND_ACK_TIMEOUT)
-        except TimeoutError:
-            _LOGGER.warning("The scale did not acknowledge being bound")
-            return
-        _LOGGER.debug("Set-manager-info ack: %s", ack.hex())
-        if ack[:1] != b"\x00":
-            _LOGGER.warning("Scale returned status %s for the bind request", ack[:1].hex())
-            return
-        self._manager_huid = huid
-        self._scale_unbound = False
-
     async def _measure(self) -> None:
         loop = asyncio.get_running_loop()
-        await self._retry_deferred_subscriptions()
         await self._write(p.SVC_BODY_COMPOSITION, p.CHR_REALTIME_WEIGHT, b"")
         # Identity reads, answered asynchronously and handled in the loop below.
         for service, characteristic in (
@@ -534,7 +470,6 @@ class Scale3Session:
                         self._publish(pending)
                         return
                     if final_requested_at is None:
-                        await self._retry_deferred_subscriptions()
                         await self._write(p.SVC_BODY_COMPOSITION, p.CHR_REALTIME_WEIGHT, b"")
                         final_requested_at = loop.time()
             else:
@@ -553,7 +488,6 @@ class Scale3Session:
         self._on_measurement(measurement, True)
 
     async def _drain_history(self) -> None:
-        await self._retry_deferred_subscriptions()
         if not await self._write(p.SVC_BODY_COMPOSITION, p.CHR_HISTORY_WEIGHT, b""):
             return
         for _ in range(MAX_HISTORY_RECORDS):

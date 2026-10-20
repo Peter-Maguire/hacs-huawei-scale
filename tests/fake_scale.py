@@ -80,7 +80,6 @@ class FakeScale:
         answer_auth: bool = True,
         work_key_reply_encrypted: bool = True,
         with_gatt: bool = True,
-        unbound: bool = False,
     ) -> None:
         self.address = address
         self.secrets = secrets
@@ -94,9 +93,6 @@ class FakeScale:
 
         self.work_key: bytes | None = None
         self.user_info: bytes | None = None
-        self.unbound = unbound  # no manager until SET_MANAGER_INFO is written
-        self.manager_info: bytes | None = None
-        self.bind_request: bytes | None = None
         self.clock: bytes | None = None
         self.weight_unit: bytes | None = None
         self.polls = 0
@@ -104,6 +100,7 @@ class FakeScale:
         self.authenticated = False
         self.disconnected = False
         self._callbacks: dict[str, object] = {}
+        self.peak_subscriptions = 0
         self._rx: dict[str, dict[int, bytes]] = {}
         self._rand_a = SCALE_RAND_A
         self._rand_b: bytes | None = None
@@ -116,6 +113,10 @@ class FakeScale:
 
     async def start_notify(self, char: FakeChar, callback) -> None:
         self._callbacks[char.uuid] = callback
+        self.peak_subscriptions = max(self.peak_subscriptions, len(self._callbacks))
+
+    async def stop_notify(self, char: FakeChar) -> None:
+        self._callbacks.pop(char.uuid, None)
 
     async def write_gatt_char(self, char: FakeChar, data: bytes, response: bool = True) -> None:
         payload = self._receive_frame(char.uuid, bytes(data))
@@ -152,7 +153,9 @@ class FakeScale:
         if encrypted:
             payload = p.encrypt_payload(payload, self.work_key, bytes(range(16)))
         loop = asyncio.get_running_loop()
-        callback = self._callbacks[uuid]
+        callback = self._callbacks.get(uuid)
+        if callback is None:  # not subscribed (any more): the host never hears it
+            return
         for wf in p.build_write_frames(payload, encrypted=encrypted):
             frame = bytearray(wf)
             frame[0] = p.FRAME_NOTIFY_ENCRYPTED if encrypted else p.FRAME_NOTIFY_PLAIN
@@ -186,23 +189,12 @@ class FakeScale:
         elif uuid == p.CHR_SET_WEIGHT_UNIT:
             self.weight_unit = payload
         elif uuid == p.CHR_GET_MANAGER_INFO:
-            if self.manager_info is not None:
-                self._notify(uuid, self.manager_info)
-            elif self.unbound:
-                self._notify(uuid, b"")
-            else:
-                self._notify(
-                    uuid, b"HUID-FROM-SCALE".ljust(30, b"\x00") + b"DEVICE-1".ljust(40, b"\x00")
-                )
-        elif uuid == p.CHR_BIND_REQUEST:
-            self.bind_request = payload
-        elif uuid == p.CHR_SET_MANAGER_INFO:
-            self.manager_info = payload
-            self._notify(uuid, b"\x00", encrypted=True)
+            self._notify(
+                uuid, b"HUID-FROM-SCALE".ljust(30, b"\x00") + b"DEVICE-1".ljust(40, b"\x00")
+            )
         elif uuid == p.CHR_SET_USER_INFO:
             self.user_info = payload
-            unbound = self.unbound and self.manager_info is None
-            self._notify(uuid, b"\x01" if unbound else b"\x00", encrypted=True)
+            self._notify(uuid, b"\x00", encrypted=True)
         elif uuid == p.CHR_REALTIME_WEIGHT:
             if self.status_ready_after == 0 or self.polls >= self.status_ready_after:
                 self._notify(uuid, self.realtime, encrypted=True)

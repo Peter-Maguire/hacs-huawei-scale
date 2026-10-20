@@ -20,10 +20,8 @@ DEFAULT_C2 = "FBCE6E2B4BAF80ED969BA26B4A4B9325"
 CONF_PROFILES = "profiles"
 CONF_READ_HISTORY = "read_history"
 CONF_COOLDOWN = "cooldown"
-CONF_BIND_UNBOUND = "bind_unbound_scale"
 
 DEFAULT_READ_HISTORY = False
-DEFAULT_BIND_UNBOUND = False
 DEFAULT_COOLDOWN = 60  # seconds to ignore the scale after a successful weigh-in
 MIN_COOLDOWN = 10
 MAX_COOLDOWN = 600

@@ -34,7 +34,6 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
-    CONF_BIND_UNBOUND,
     CONF_BIRTH_DATE,
     CONF_C1,
     CONF_C2,
@@ -46,7 +45,6 @@ from .const import (
     CONF_PROFILES,
     CONF_READ_HISTORY,
     CONF_SEX,
-    DEFAULT_BIND_UNBOUND,
     DEFAULT_COOLDOWN,
     DEFAULT_READ_HISTORY,
     DOMAIN,
@@ -332,7 +330,6 @@ class HuaweiScale3OptionsFlow(OptionsFlowWithReload):
                 data={
                     **options,
                     CONF_READ_HISTORY: user_input[CONF_READ_HISTORY],
-                    CONF_BIND_UNBOUND: user_input[CONF_BIND_UNBOUND],
                     CONF_COOLDOWN: int(user_input[CONF_COOLDOWN]),
                 }
             )
@@ -341,10 +338,6 @@ class HuaweiScale3OptionsFlow(OptionsFlowWithReload):
                 vol.Required(
                     CONF_READ_HISTORY,
                     default=options.get(CONF_READ_HISTORY, DEFAULT_READ_HISTORY),
-                ): BooleanSelector(),
-                vol.Required(
-                    CONF_BIND_UNBOUND,
-                    default=options.get(CONF_BIND_UNBOUND, DEFAULT_BIND_UNBOUND),
                 ): BooleanSelector(),
                 vol.Required(
                     CONF_COOLDOWN, default=options.get(CONF_COOLDOWN, DEFAULT_COOLDOWN)

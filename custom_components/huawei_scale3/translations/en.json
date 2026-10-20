@@ -60,10 +60,9 @@
       },
       "settings": {
         "title": "Behaviour",
-        "description": "History import fires an event for measurements stored on the scale that were taken while Home Assistant could not hear it. The cool-down stops the scale being re-read straight after a weigh-in. A scale that was never paired with the Huawei Health app has no owner and may refuse to measure; binding writes a made-up owner ID to it, which stays until the scale is factory-reset and may stop Huawei Health pairing with it later.",
+        "description": "History import fires an event for measurements stored on the scale that were taken while Home Assistant could not hear it. The cool-down stops the scale being re-read straight after a weigh-in.",
         "data": {
           "read_history": "Read stored measurements from the scale",
-          "bind_unbound_scale": "Bind an unbound scale (experimental)",
           "cooldown": "Cool-down after a weigh-in"
         }
       },

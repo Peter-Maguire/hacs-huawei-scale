@@ -16,8 +16,7 @@ USER = s.ScaleUser(user_id=7, male=True, age=46, height_cm=178, weight_kg=91.4)
 
 
 async def go(
-    scale: FakeScale, *, secrets=SECRETS, read_history=False, user=USER, metric=True, before=None,
-    bind_if_unbound=False,
+    scale: FakeScale, *, secrets=SECRETS, read_history=False, user=USER, metric=True, before=None
 ):
     """Run a session to completion. Raises whatever the session raises."""
     out = SimpleNamespace(states=[], measurements=[], info={}, session=None)
@@ -29,7 +28,6 @@ async def go(
             secrets,
             user,
             read_history=read_history,
-            bind_if_unbound=bind_if_unbound,
             metric=metric,
             now=lambda: datetime(2026, 8, 10, 7, 5, 9),
             on_state=out.states.append,
@@ -165,123 +163,27 @@ async def test_history_off_by_default():
     assert scale.history_requests == 0
 
 
-class _IndicateOnlyChar:
-    properties = ["indicate"]
-
-    def __init__(self, with_cccd: bool = True) -> None:
-        self._cccd = object() if with_cccd else None
-
-    def get_descriptor(self, uuid: str):
-        return self._cccd if uuid == s.CCCD_UUID else None
+async def test_subscriptions_stay_within_the_proxy_limit():
+    """ESPHome proxies refuse (GATT error 128) beyond ~12 concurrent subscriptions."""
+    scale = FakeScale(ADDRESS, SECRETS, history=(realtime_payload(flags=bytes([1, 0])),))
+    out = await go(scale, read_history=True)
+    assert len(out.measurements) >= 1
+    assert scale.peak_subscriptions <= 9
 
 
-class _RecordingClient:
-    def __init__(self) -> None:
-        self.descriptor_writes: list[tuple[object, bytes]] = []
-
-    async def write_gatt_descriptor(self, descriptor, data) -> None:
-        self.descriptor_writes.append((descriptor, bytes(data)))
-
-
-async def test_indicate_only_characteristics_get_the_indicate_bit() -> None:
-    client = _RecordingClient()
-    session = s.Scale3Session(client, ADDRESS, SECRETS, USER)
-    char = _IndicateOnlyChar()
-    await session._prefer_indication(char, "2a9d")
-    assert client.descriptor_writes == [(char._cccd, b"\x02\x00")]
-
-
-async def test_notify_capable_or_cccd_less_characteristics_are_left_alone() -> None:
-    client = _RecordingClient()
-    session = s.Scale3Session(client, ADDRESS, SECRETS, USER)
-
-    both = _IndicateOnlyChar()
-    both.properties = ["notify", "indicate"]
-    await session._prefer_indication(both, "x")
-    await session._prefer_indication(_IndicateOnlyChar(with_cccd=False), "y")
-    await session._prefer_indication(object(), "z")  # no properties at all
-    assert client.descriptor_writes == []
-
-
-class _FlakyNotifyClient:
-    """Refuses to subscribe to ``refused`` until ``allow`` is called."""
-
-    def __init__(self, refused: str) -> None:
-        self.refused = refused
-        self.allowed = False
-        self.subscribed: list[str] = []
-        self.services = _OneCharServices(refused)
-
-    def allow(self) -> None:
-        self.allowed = True
-
-    async def start_notify(self, char, callback) -> None:
-        if char.uuid == self.refused and not self.allowed:
-            raise RuntimeError("Application error")
-        self.subscribed.append(char.uuid)
-
-
-class _Char:
-    properties = ["notify"]
-
-    def __init__(self, uuid: str) -> None:
-        self.uuid = uuid
-
-
-class _OneCharServices:
-    def __init__(self, uuid: str) -> None:
-        self._char = _Char(uuid)
-
-    def get_service(self, _uuid: str):
-        return self
-
-    def get_characteristic(self, _uuid: str):
-        return self._char
-
-
-async def test_refused_subscription_is_retried_later() -> None:
+async def test_realtime_characteristic_is_subscribed_while_measuring():
     from custom_components.huawei_scale3 import protocol as p
 
-    uuid = p.CHR_REALTIME_WEIGHT
-    client = _FlakyNotifyClient(uuid)
-    session = s.Scale3Session(client, ADDRESS, SECRETS, USER)
-    service, characteristic, kind = next(
-        item for item in p.NOTIFY_CHARACTERISTICS if item[1] == uuid
-    )
-
-    assert not await session._start_notify(service, characteristic, kind)
-    session._deferred.append((service, characteristic, kind))
-    await session._retry_deferred_subscriptions()
-    assert session._deferred and client.subscribed == []  # still refused
-
-    client.allow()
-    await session._retry_deferred_subscriptions()
-    assert session._deferred == [] and client.subscribed == [uuid]
-
-
-async def test_unbound_scale_is_left_alone_unless_binding_is_enabled():
-    scale = FakeScale(ADDRESS, SECRETS, unbound=True)
-    await go(scale)
-    assert scale.manager_info is None
-    assert scale.user_info[:30].rstrip(b"\x00") == b"openscale:381EC76608D3"
-
-
-async def test_unbound_scale_is_bound_when_enabled():
-    scale = FakeScale(ADDRESS, SECRETS, unbound=True)
-    out = await go(scale, bind_if_unbound=True)
-
-    assert scale.bind_request is not None and len(scale.bind_request) == 30
-    assert scale.bind_request.rstrip(b"\x00") == b"openscale:381EC76608D3"
-    info = scale.manager_info
-    assert info is not None and len(info) == 70
-    assert info[:30].rstrip(b"\x00") == b"openscale:381EC76608D3"
-    assert info[30:].rstrip(b"\x00") == b"homeassistant:381EC76608D3"
-    # The profile that follows uses the new manager's HUID and is accepted.
-    assert scale.user_info[:30] == info[:30]
-    assert len(out.measurements) == 1
-
-
-async def test_bound_scale_is_never_rebound():
     scale = FakeScale(ADDRESS, SECRETS)
-    await go(scale, bind_if_unbound=True)
-    assert scale.manager_info is None
+    seen = []
+
+    original = scale.write_gatt_char
+
+    async def spy(char, data, response=True):
+        if char.uuid == p.CHR_REALTIME_WEIGHT:
+            seen.append(p.CHR_REALTIME_WEIGHT in scale._callbacks)
+        await original(char, data, response)
+
+    scale.write_gatt_char = spy
+    await go(scale)
+    assert seen and all(seen)
