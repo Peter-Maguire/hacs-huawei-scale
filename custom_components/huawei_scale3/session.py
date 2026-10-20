@@ -118,6 +118,8 @@ class Scale3Session:
         self._inbox: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
         self._backlog: deque[tuple[str, bytes]] = deque()
         self._manager_huid: str | None = None
+        self._seen: dict[str, int] = {}
+        self._last_status: int | None = None
         self.measurement_published = False
 
     # ------------------------------------------------------------------ io
@@ -177,6 +179,8 @@ class Scale3Session:
             except ValueError as err:
                 _LOGGER.debug("Cannot decrypt notification on %s: %s", uuid, err)
                 return
+        _LOGGER.debug("RX %s: %s", kind, payload.hex())
+        self._seen[kind] = self._seen.get(kind, 0) + 1
         self._inbox.put_nowait((kind, payload))
 
     async def _write(self, service: str, characteristic: str, payload: bytes,
@@ -185,6 +189,7 @@ class Scale3Session:
         if char is None:
             return False
         frames = encrypted_frames or p.build_write_frames(payload)
+        _LOGGER.debug("TX %s (%d frame(s))", characteristic, len(frames))
         for frame in frames:
             await self._client.write_gatt_char(char, frame, response=True)
         return True
@@ -385,6 +390,9 @@ class Scale3Session:
             if kind == "realtime":
                 measurement = p.parse_realtime_measurement(payload)
                 if measurement is None or measurement.weight_kg <= 0:
+                    _LOGGER.debug(
+                        "Realtime payload ignored (%d bytes, parsed=%s)", len(payload), measurement
+                    )
                     continue
                 pending = measurement
                 if measurement.impedance_ohm is not None:
@@ -393,6 +401,7 @@ class Scale3Session:
                     return
             elif kind == "status":
                 status = payload[0] if payload else None
+                self._last_status = status
                 _LOGGER.debug("Measurement status %s", status)
                 if status == 0x00:
                     if pending is not None:
@@ -406,7 +415,13 @@ class Scale3Session:
             else:
                 self._handle_info(kind, payload)
 
-        raise SessionError("timed out waiting for a measurement")
+        received = ", ".join(f"{k} x{n}" for k, n in sorted(self._seen.items())) or "nothing"
+        raise SessionError(
+            "timed out waiting for a measurement "
+            f"(received {received}; last status {self._last_status}; "
+            f"weight seen: {pending is not None}; impedance seen: "
+            f"{pending is not None and pending.impedance_ohm is not None})"
+        )
 
     def _publish(self, measurement: p.WeightMeasurement) -> None:
         self.measurement_published = True

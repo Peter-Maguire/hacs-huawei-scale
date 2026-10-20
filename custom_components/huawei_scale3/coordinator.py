@@ -301,10 +301,9 @@ class HuaweiScale3Coordinator:
         if key == "sw_version" and value != self.sw_version:
             self.sw_version = value
             registry = dr.async_get(self.hass)
-            if device := registry.async_get_device(
-                identifiers={(DOMAIN, self.address)}
-            ):
-                registry.async_update_device(device.id, sw_version=value)
+            for device in dr.async_entries_for_config_entry(registry, self.entry.entry_id):
+                if (DOMAIN, self.address) in device.identifiers:
+                    registry.async_update_device(device.id, sw_version=value)
             self._save()
         elif key == "product_id" and value != self.product_id:
             self.product_id = value
