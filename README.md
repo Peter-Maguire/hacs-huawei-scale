@@ -58,8 +58,6 @@ automation:
   (a local adapter or an ESPHome Bluetooth proxy with active connections).
 * A Huawei Scale 3. (Scale 3 **Pro**, Scale 2 Pro and Honor scales use the same
   family of protocol but behave differently; they are deliberately not matched.)
-* **An authentication key (CAK, C1 and C2, concatenated)** — see below. This
-  is the one non-obvious part.
 * A Linux/Home Assistant OS host. The key derivation needs the scale's real
   MAC address, which macOS hides from Bluetooth clients.
 
@@ -70,23 +68,23 @@ knowledge of a shared secret (the *CAK*), and the data is encrypted with a key
 derived from two further secrets (*C1*, *C2*) and the scale's Bluetooth
 address. Each is 16 bytes.
 
-Setup asks for all three as **one field**: 96 hex characters, CAK then C1 then
-C2 concatenated with nothing in between (whitespace, `:` and `-` are stripped
-for you, so a spaced or colon-grouped string also works). The integration
-splits it into the three values itself; nothing is derived or computed beyond
-that split.
+You do not have to enter anything: the three values are built in
+(`custom_components/huawei_scale3/const.py`) and the integration derives the
+session keys from them and the scale's address automatically. They are the
+constants the Huawei Health app itself uses (its native library calls them
+CAK, A and B; here A and B are C1 and C2), recovered by static analysis of that
+library. They have not been checked against a live scale.
 
-**This integration does not supply the keys, cannot generate them, and contains
-no extraction code.** Where they come from is not documented anywhere I could
-verify. openScale's maintainer keeps them user-supplied and does not discuss
-obtaining them in its tracker, and reports there suggest the values may not be
-unique to each scale (so they may not be something your own scale generates).
-Treat the combined key like a password: it goes into this config entry only
-(redacted from diagnostics), never into any file in this project.
+If your scale rejects them, Home Assistant starts a re-authentication flow
+after three failures. There you can paste a custom key (96 hex characters: CAK,
+C1, C2 concatenated; whitespace, `:` and `-` are stripped) which is stored in
+this config entry only and redacted from diagnostics, or leave the field blank
+to go back to the built-in key.
 
 ## Installation
 
-1. HACS → ⋮ → **Custom repositories** → add this repository, category
+1. HACS → ⋮ → **Custom repositories** → add
+   `https://github.com/Peter-Maguire/hacs-huawei-scale`, category
    **Integration** → install **Huawei Scale 3** → restart Home Assistant.
    *(Manual: copy `custom_components/huawei_scale3` into your config's
    `custom_components` folder.)*
@@ -94,7 +92,8 @@ Treat the combined key like a password: it goes into this config entry only
    should offer **Huawei Scale 3** under *Discovered*; otherwise
    **Settings → Devices & services → Add integration → Huawei Scale 3** and pick it
    or type its Bluetooth address.
-3. Enter the authentication key, then your profile (name, sex, date of birth, height).
+3. Enter your profile (name, sex, date of birth, height). Type the date of
+   birth as `YYYY-MM-DD` (`1985-03-27`) or `DD/MM/YYYY` (`27/03/1985`).
 
 ## Using it
 
@@ -127,7 +126,8 @@ of range as `huawei_scale3_measurement` events with `history: true`
   the Bluetooth integration's *Advertisement monitor* for the scale. A local
   adapter/proxy must be within range *and* allow active connections.
 * **`auth_error` / re-authentication prompt.** The CAK, C1 or C2 is wrong. After three
-  consecutive failures Home Assistant asks you to re-enter the keys.
+  consecutive failures Home Assistant asks you to enter a custom key (or retry
+  with the built-in one).
 * **`error`: timed out waiting for a measurement.** You stepped off before the
   scale finished (about 20–30 s with bare feet).
 * Debug log:
@@ -139,7 +139,8 @@ of range as `huawei_scale3_measurement` events with `history: true`
   ```
 
   When reporting a problem, include the log and the diagnostics download (keys,
-  address and profile data are redacted).
+  address and profile data are redacted) in an
+  [issue](https://github.com/Peter-Maguire/hacs-huawei-scale/issues).
 
 ## How it works
 
@@ -164,6 +165,8 @@ scope for a BLE weigh-in reader, and the last two are destructive.
 ## Development
 
 ```bash
+git clone https://github.com/Peter-Maguire/hacs-huawei-scale
+cd hacs-huawei-scale
 pip install -r requirements_test.txt
 pytest
 ```

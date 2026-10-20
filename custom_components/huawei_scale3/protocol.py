@@ -4,8 +4,8 @@ Pure Python, no Home Assistant imports, so it can be unit-tested on its own.
 
 This is a port of the protocol handling in the openScale project
 (``HuaweiHagridWspLib.kt``, GPL-3.0, https://github.com/oliexdev/openScale).
-The CAK / C1 / C2 secrets are supplied by the user; nothing in this module
-extracts them from anywhere.
+The CAK / C1 / C2 secrets are passed in by the caller (see ``const.py`` for the
+built-in defaults); nothing in this module extracts them from anywhere.
 
 Framing
 -------

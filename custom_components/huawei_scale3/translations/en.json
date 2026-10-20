@@ -11,14 +11,7 @@
       },
       "bluetooth_confirm": {
         "title": "Set up Huawei Scale 3",
-        "description": "Found {name} ({address}). Next you will enter its authentication key and your profile."
-      },
-      "secrets": {
-        "title": "Authentication key",
-        "description": "The scale authenticates and encrypts its data with three 16-byte keys (CAK, C1 and C2) that this integration does not supply. Enter them concatenated in that order as 96 hexadecimal characters (CAK, then C1, then C2); see the README. This is kept only in this config entry, never written to the integration's files.",
-        "data": {
-          "auth_key": "Authentication key"
-        }
+        "description": "Found {name} ({address}). Next you will enter your profile."
       },
       "profile": {
         "title": "Your profile",
@@ -29,11 +22,14 @@
           "birth_date": "Date of birth",
           "height_cm": "Height",
           "initial_weight_kg": "Starting weight"
+        },
+        "data_description": {
+          "birth_date": "Type it as YYYY-MM-DD (1985-03-27) or DD/MM/YYYY (27/03/1985)."
         }
       },
       "reauth_confirm": {
-        "title": "Re-enter the authentication key",
-        "description": "{name} rejected the authentication several times in a row. Check the key and enter it again.",
+        "title": "Authentication failed",
+        "description": "{name} rejected the authentication several times in a row. Enter a custom key (CAK, C1 and C2 concatenated, 96 hexadecimal characters) to override the built-in one, or leave this blank to retry with the built-in key.",
         "data": {
           "auth_key": "Authentication key"
         }
@@ -41,10 +37,10 @@
     },
     "error": {
       "invalid_address": "Enter a Bluetooth address like AA:BB:CC:DD:EE:FF.",
-      "invalid_key": "Enter exactly 96 hexadecimal characters (CAK, C1 and C2 concatenated).",
+      "invalid_key": "Enter exactly 96 hexadecimal characters (CAK, C1 and C2 concatenated), or leave it blank.",
       "name_required": "Enter a name.",
       "name_exists": "A profile with this name already exists.",
-      "invalid_birth_date": "Enter a valid date of birth in the past."
+      "invalid_birth_date": "Enter a valid date of birth in the past, as YYYY-MM-DD or DD/MM/YYYY."
     },
     "abort": {
       "already_configured": "This scale is already set up.",
@@ -78,6 +74,9 @@
           "birth_date": "Date of birth",
           "height_cm": "Height",
           "initial_weight_kg": "Starting weight"
+        },
+        "data_description": {
+          "birth_date": "Type it as YYYY-MM-DD (1985-03-27) or DD/MM/YYYY (27/03/1985)."
         }
       },
       "remove_profile": {
@@ -90,7 +89,7 @@
     "error": {
       "name_required": "Enter a name.",
       "name_exists": "A profile with this name already exists.",
-      "invalid_birth_date": "Enter a valid date of birth in the past."
+      "invalid_birth_date": "Enter a valid date of birth in the past, as YYYY-MM-DD or DD/MM/YYYY."
     }
   },
   "selector": {

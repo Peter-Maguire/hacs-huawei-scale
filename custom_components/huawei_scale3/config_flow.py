@@ -22,7 +22,6 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
     BooleanSelector,
-    DateSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -57,12 +56,38 @@ from .const import (
 from .protocol import identify_scale_3
 from .session import is_hex_key
 
+_KEY_FIELDS = (CONF_CAK, CONF_C1, CONF_C2)
+
 _MAC_RE = re.compile(r"^([0-9A-F]{2}[:-]){5}[0-9A-F]{2}$")
 
-#: A single field holding CAK, C1 and C2 concatenated (32 hex chars each,
-#: 96 total). Entered here and split below; never written to this project's
-#: files, only to this config entry.
+#: Optional override, only offered when re-authenticating: CAK, C1 and C2
+#: concatenated (32 hex chars each, 96 total). Left blank, the built-in keys
+#: from const.py are used.
 AUTH_KEY_FIELD = "auth_key"
+
+_DOB_ISO_RE = re.compile(r"^(\d{4})\D?(\d{1,2})\D?(\d{1,2})$")
+_DOB_DMY_RE = re.compile(r"^(\d{1,2})\D(\d{1,2})\D(\d{4})$")
+
+
+def parse_birth_date(raw: object) -> date | None:
+    """Parse a typed date of birth, or None if it is not a valid past date.
+
+    Accepts year-first (``1985-03-27``, ``1985/3/27``, ``19850327``) and
+    day-first (``27/03/1985``, ``27.3.1985``) with any single non-digit
+    separator. Day-first is the only reading of a date that ends in the year.
+    """
+    text = str(raw or "").strip()
+    try:
+        if match := _DOB_ISO_RE.match(text):
+            year, month, day = (int(g) for g in match.groups())
+        elif match := _DOB_DMY_RE.match(text):
+            day, month, year = (int(g) for g in match.groups())
+        else:
+            return None
+        born = date(year, month, day)
+    except ValueError:
+        return None
+    return born if date(1900, 1, 1) <= born < date.today() else None
 
 
 def _normalise_mac(raw: str) -> str | None:
@@ -74,10 +99,10 @@ def _clean_key(raw: str) -> str:
     return re.sub(r"[\s:\-]", "", raw).upper()
 
 
-def _auth_key_schema(default: str = "") -> vol.Schema:
+def _auth_key_schema() -> vol.Schema:
     return vol.Schema(
         {
-            vol.Required(AUTH_KEY_FIELD, default=default): TextSelector(
+            vol.Optional(AUTH_KEY_FIELD, default=""): TextSelector(
                 TextSelectorConfig(type=TextSelectorType.PASSWORD)
             )
         }
@@ -85,8 +110,13 @@ def _auth_key_schema(default: str = "") -> vol.Schema:
 
 
 def _validate_auth_key(user_input: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
-    """Return ({CAK, C1, C2}, errors) split from the combined field."""
+    """Return ({CAK, C1, C2}, errors) split from the combined field.
+
+    A blank field returns no keys and no errors, meaning "use the built-in keys".
+    """
     cleaned = _clean_key(user_input.get(AUTH_KEY_FIELD, ""))
+    if not cleaned:
+        return {}, {}
     if not is_hex_key(cleaned, byte_length=48):
         return {}, {AUTH_KEY_FIELD: "invalid_key"}
     return {CONF_CAK: cleaned[0:32], CONF_C1: cleaned[32:64], CONF_C2: cleaned[64:96]}, {}
@@ -104,7 +134,7 @@ def _profile_schema(defaults: Mapping[str, Any] | None = None) -> vol.Schema:
                     translation_key="sex",
                 )
             ),
-            vol.Required(CONF_BIRTH_DATE, default=d.get(CONF_BIRTH_DATE, "1985-01-01")): DateSelector(),
+            vol.Required(CONF_BIRTH_DATE, default=d.get(CONF_BIRTH_DATE, "")): TextSelector(),
             vol.Required(CONF_HEIGHT, default=d.get(CONF_HEIGHT, 175)): NumberSelector(
                 NumberSelectorConfig(
                     min=120, max=230, step=1, unit_of_measurement="cm",
@@ -132,16 +162,13 @@ def _validate_profile(
         errors[CONF_NAME] = "name_required"
     elif name.casefold() in (n.casefold() for n in existing_names):
         errors[CONF_NAME] = "name_exists"
-    try:
-        born = date.fromisoformat(user_input[CONF_BIRTH_DATE])
-        if not date(1900, 1, 1) <= born < date.today():
-            raise ValueError
-    except (KeyError, ValueError):
+    born = parse_birth_date(user_input.get(CONF_BIRTH_DATE))
+    if born is None:
         errors[CONF_BIRTH_DATE] = "invalid_birth_date"
     profile = {
         CONF_NAME: name,
         CONF_SEX: user_input.get(CONF_SEX, SEX_MALE),
-        CONF_BIRTH_DATE: user_input.get(CONF_BIRTH_DATE),
+        CONF_BIRTH_DATE: born.isoformat() if born else None,
         CONF_HEIGHT: float(user_input.get(CONF_HEIGHT, 175)),
         CONF_INITIAL_WEIGHT: float(user_input.get(CONF_INITIAL_WEIGHT, 70)),
     }
@@ -156,7 +183,6 @@ class HuaweiScale3ConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._address: str | None = None
         self._name: str = "Huawei Scale 3"
-        self._keys: dict[str, str] = {}
 
     @staticmethod
     @callback
@@ -185,7 +211,7 @@ class HuaweiScale3ConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         if user_input is not None:
-            return await self.async_step_secrets()
+            return await self.async_step_profile()
         self._set_confirm_only()
         return self.async_show_form(
             step_id="bluetooth_confirm",
@@ -216,7 +242,7 @@ class HuaweiScale3ConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(address)
                 self._abort_if_unique_id_configured()
                 self._address = address
-                return await self.async_step_secrets()
+                return await self.async_step_profile()
 
         if candidates:
             schema = vol.Schema({vol.Required(CONF_ADDRESS): vol.In(candidates)})
@@ -230,24 +256,7 @@ class HuaweiScale3ConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ---------------------------------------------------------------- secrets
-
-    async def async_step_secrets(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            keys, errors = _validate_auth_key(user_input)
-            if not errors:
-                self._keys = keys
-                return await self.async_step_profile()
-        return self.async_show_form(
-            step_id="secrets",
-            data_schema=self.add_suggested_values_to_schema(
-                _auth_key_schema(), user_input or {}
-            ),
-            errors=errors,
-        )
+    # ---------------------------------------------------------------- profile
 
     async def async_step_profile(
         self, user_input: dict[str, Any] | None = None
@@ -260,7 +269,7 @@ class HuaweiScale3ConfigFlow(ConfigFlow, domain=DOMAIN):
                 short = self._address.replace(":", "")[-4:]
                 return self.async_create_entry(
                     title=f"Huawei Scale 3 {short}",
-                    data={CONF_ADDRESS: self._address, **self._keys},
+                    data={CONF_ADDRESS: self._address},
                     options={
                         CONF_PROFILES: [profile],
                         CONF_READ_HISTORY: DEFAULT_READ_HISTORY,
@@ -290,7 +299,9 @@ class HuaweiScale3ConfigFlow(ConfigFlow, domain=DOMAIN):
             if not errors:
                 if hasattr(entry, "runtime_data") and entry.runtime_data:
                     entry.runtime_data.reset_auth_state()
-                return self.async_update_reload_and_abort(entry, data_updates=keys)
+                # Blank means "back to the built-in keys": drop any override.
+                data = {k: v for k, v in entry.data.items() if k not in _KEY_FIELDS}
+                return self.async_update_reload_and_abort(entry, data={**data, **keys})
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=_auth_key_schema(),

@@ -40,6 +40,9 @@ from .const import (
     CONF_COOLDOWN,
     CONF_PROFILES,
     CONF_READ_HISTORY,
+    DEFAULT_C1,
+    DEFAULT_C2,
+    DEFAULT_CAK,
     DEFAULT_COOLDOWN,
     DEFAULT_READ_HISTORY,
     DOMAIN,
@@ -109,8 +112,11 @@ class HuaweiScale3Coordinator:
 
     @property
     def secrets(self) -> Secrets:
+        data = self.entry.data
         return Secrets.from_hex(
-            self.entry.data[CONF_CAK], self.entry.data[CONF_C1], self.entry.data[CONF_C2]
+            data.get(CONF_CAK, DEFAULT_CAK),
+            data.get(CONF_C1, DEFAULT_C1),
+            data.get(CONF_C2, DEFAULT_C2),
         )
 
     async def async_set_active_profile(self, name: str) -> None:

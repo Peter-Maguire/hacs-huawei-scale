@@ -19,6 +19,7 @@ from pytest_homeassistant_custom_component.common import (
     async_capture_events,
 )
 
+from custom_components.huawei_scale3.config_flow import parse_birth_date
 from custom_components.huawei_scale3.const import (
     CONF_C1,
     CONF_C2,
@@ -26,6 +27,9 @@ from custom_components.huawei_scale3.const import (
     CONF_COOLDOWN,
     CONF_PROFILES,
     CONF_READ_HISTORY,
+    DEFAULT_C1,
+    DEFAULT_C2,
+    DEFAULT_CAK,
     DOMAIN,
     EVENT_MEASUREMENT,
 )
@@ -40,9 +44,6 @@ KEYS = {
     CONF_C1: SECRETS.c1.hex().upper(),
     CONF_C2: SECRETS.c2.hex().upper(),
 }
-#: What you'd type into the single "Authentication key" config-flow field.
-AUTH_KEY = KEYS[CONF_CAK] + KEYS[CONF_C1] + KEYS[CONF_C2]
-AUTH_KEY_INPUT = {"auth_key": AUTH_KEY}
 ALEX = {
     "name": "Alex",
     "sex": "male",
@@ -67,8 +68,6 @@ def service_info(name: str = "HUAWEI Scale 3", address: str = ADDRESS, mfr=None)
 
 
 async def _finish_flow(hass: HomeAssistant, flow_id: str):
-    result = await hass.config_entries.flow.async_configure(flow_id, AUTH_KEY_INPUT)
-    assert result["step_id"] == "profile"
     return await hass.config_entries.flow.async_configure(
         flow_id,
         {
@@ -89,7 +88,7 @@ async def test_bluetooth_discovery_creates_entry(hass: HomeAssistant) -> None:
     assert result["step_id"] == "bluetooth_confirm"
 
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
-    assert result["step_id"] == "secrets"
+    assert result["step_id"] == "profile"
 
     with patch("custom_components.huawei_scale3.async_setup_entry", return_value=True):
         result = await _finish_flow(hass, result["flow_id"])
@@ -97,7 +96,8 @@ async def test_bluetooth_discovery_creates_entry(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Huawei Scale 3 08D3"
     assert result["result"].unique_id == ADDRESS
-    assert result["data"] == {CONF_ADDRESS: ADDRESS, **KEYS}
+    # No keys are stored: the built-in defaults are used.
+    assert result["data"] == {CONF_ADDRESS: ADDRESS}
     assert result["options"][CONF_PROFILES] == [ALEX | {"initial_weight_kg": 85.0}]
     assert result["options"][CONF_READ_HISTORY] is False
 
@@ -138,27 +138,50 @@ async def test_manual_address_flow_and_validation(hass: HomeAssistant) -> None:
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {CONF_ADDRESS: "38-1e-c7-66-08-d3"}
         )
-    assert result["step_id"] == "secrets"
+    assert result["step_id"] == "profile"
 
-    # A key that is too short is rejected, whitespace/colons are tolerated.
-    bad = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"auth_key": AUTH_KEY[:-4]}
-    )
-    assert bad["errors"] == {"auth_key": "invalid_key"}
-
-    spaced = {"auth_key": ":".join(AUTH_KEY[i : i + 2] for i in range(0, 96, 2))}
+    # A day-first date typed by hand is accepted and stored as ISO.
     with patch("custom_components.huawei_scale3.async_setup_entry", return_value=True):
-        ok = await hass.config_entries.flow.async_configure(result["flow_id"], spaced)
         ok = await hass.config_entries.flow.async_configure(
-            ok["flow_id"],
+            result["flow_id"],
             {
-                "name": "Alex", "sex": "male", "birth_date": "1980-01-01",
+                "name": "Alex", "sex": "male", "birth_date": "01/01/1980",
                 "height_cm": 178, "initial_weight_kg": 85,
             },
         )
     assert ok["type"] is FlowResultType.CREATE_ENTRY
     assert ok["data"][CONF_ADDRESS] == ADDRESS
-    assert ok["data"][CONF_CAK] == KEYS[CONF_CAK]
+    assert CONF_CAK not in ok["data"]
+    assert ok["result"].options[CONF_PROFILES][0]["birth_date"] == "1980-01-01"
+
+
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        ("1985-03-27", "1985-03-27"),
+        ("1985/3/27", "1985-03-27"),
+        ("19850327", "1985-03-27"),
+        (" 27/03/1985 ", "1985-03-27"),
+        ("27.3.1985", "1985-03-27"),
+        ("2999-01-01", None),  # future
+        ("1850-01-01", None),  # implausibly old
+        ("1985-02-30", None),  # no such day
+        ("27/13/1985", None),
+        ("March 1985", None),
+        ("", None),
+    ],
+)
+def test_parse_birth_date(typed: str, expected: str | None) -> None:
+    born = parse_birth_date(typed)
+    assert (born.isoformat() if born else None) == expected
+
+
+def test_built_in_keys_are_used_when_entry_has_none() -> None:
+    from custom_components.huawei_scale3.coordinator import HuaweiScale3Coordinator
+
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=ADDRESS, data={CONF_ADDRESS: ADDRESS})
+    secrets = HuaweiScale3Coordinator.secrets.fget(MagicMock(entry=entry))
+    assert secrets == Secrets.from_hex(DEFAULT_CAK, DEFAULT_C1, DEFAULT_C2)
 
 
 async def test_profile_validation(hass: HomeAssistant) -> None:
@@ -166,7 +189,6 @@ async def test_profile_validation(hass: HomeAssistant) -> None:
         DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=service_info()
     )
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], AUTH_KEY_INPUT)
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         {
@@ -369,6 +391,19 @@ async def test_repeated_auth_failures_start_reauth(
 
     flows = [f for f in hass.config_entries.flow.async_progress() if f["context"]["source"] == "reauth"]
     assert len(flows) == 1
+
+
+async def test_reauth_blank_key_restores_built_in_keys(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    with Harness(hass, entry, FakeScale(ADDRESS, SECRETS)):
+        result = await entry.start_reauth_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"auth_key": ""}
+        )
+        await hass.async_block_till_done()
+    assert result["reason"] == "reauth_successful"
+    assert entry.data == {CONF_ADDRESS: ADDRESS}
 
 
 async def test_reauth_updates_the_keys(hass: HomeAssistant, entry: MockConfigEntry) -> None:

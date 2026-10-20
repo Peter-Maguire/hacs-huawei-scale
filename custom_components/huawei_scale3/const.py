@@ -3,10 +3,18 @@ from __future__ import annotations
 
 DOMAIN = "huawei_scale3"
 
-# Config entry data
+# Config entry data. These are optional overrides: when an entry has no keys
+# the built-in defaults below are used.
 CONF_CAK = "cak"
 CONF_C1 = "c1"
 CONF_C2 = "c2"
+
+# Built-in Huawei Health secrets (see FINDINGS-hagrid-protocol.md, step 3).
+# The app's native library calls them CAK (id 33), A (id 1033) and B (id 2033);
+# this integration's C1/C2 are A/B. Each is 16 bytes, hex-encoded.
+DEFAULT_CAK = "90B96ECA297EF78717E66E491084D3F8"
+DEFAULT_C1 = "CA4946D061C9FE534F6044F930EBB69B"
+DEFAULT_C2 = "FBCE6E2B4BAF80ED969BA26B4A4B9325"
 
 # Config entry options
 CONF_PROFILES = "profiles"
