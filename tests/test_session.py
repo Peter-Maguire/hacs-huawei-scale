@@ -161,3 +161,41 @@ async def test_history_off_by_default():
     scale = FakeScale(ADDRESS, SECRETS, history=(realtime_payload(flags=bytes([1, 0])),))
     await go(scale)
     assert scale.history_requests == 0
+
+
+class _IndicateOnlyChar:
+    properties = ["indicate"]
+
+    def __init__(self, with_cccd: bool = True) -> None:
+        self._cccd = object() if with_cccd else None
+
+    def get_descriptor(self, uuid: str):
+        return self._cccd if uuid == s.CCCD_UUID else None
+
+
+class _RecordingClient:
+    def __init__(self) -> None:
+        self.descriptor_writes: list[tuple[object, bytes]] = []
+
+    async def write_gatt_descriptor(self, descriptor, data) -> None:
+        self.descriptor_writes.append((descriptor, bytes(data)))
+
+
+async def test_indicate_only_characteristics_get_the_indicate_bit() -> None:
+    client = _RecordingClient()
+    session = s.Scale3Session(client, ADDRESS, SECRETS, USER)
+    char = _IndicateOnlyChar()
+    await session._prefer_indication(char, "2a9d")
+    assert client.descriptor_writes == [(char._cccd, b"\x02\x00")]
+
+
+async def test_notify_capable_or_cccd_less_characteristics_are_left_alone() -> None:
+    client = _RecordingClient()
+    session = s.Scale3Session(client, ADDRESS, SECRETS, USER)
+
+    both = _IndicateOnlyChar()
+    both.properties = ["notify", "indicate"]
+    await session._prefer_indication(both, "x")
+    await session._prefer_indication(_IndicateOnlyChar(with_cccd=False), "y")
+    await session._prefer_indication(object(), "z")  # no properties at all
+    assert client.descriptor_writes == []

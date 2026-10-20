@@ -39,6 +39,7 @@ MAX_HISTORY_RECORDS = 64
 #: Upper bound for the weighing itself (the scale needs ~20-25 s).
 MEASUREMENT_TIMEOUT = MAX_STATUS_POLLS * STATUS_POLL_INTERVAL + FINAL_REQUEST_GRACE
 
+CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
 SYNTHETIC_HUID_PREFIX = "openscale:"  # same format the openScale driver uses
 
 _STREAM_KINDS = frozenset({"realtime", "status", "history"})
@@ -156,11 +157,39 @@ class Scale3Session:
                 _LOGGER.debug("Skipping notifications for %s: %s", characteristic, err)
                 continue
             subscribed += 1
+            await self._prefer_indication(char, characteristic)
         if not subscribed or self._characteristic(p.SVC_USER_DATA, p.CHR_REQUEST_AUTH) is None:
             raise SessionError(
                 "device does not expose the Huawei Hagrid GATT layout "
                 "(is this really a Huawei Scale 3?)"
             )
+
+    async def _prefer_indication(self, char: Any, uuid: str) -> None:
+        """Switch an indicate-only characteristic from notify to indicate.
+
+        ``start_notify`` on some backends (notably ESPHome Bluetooth proxies)
+        always writes the *notify* bit of the CCCD. The Huawei app writes the
+        *indicate* bit, and the scale's indicate-only characteristics (the SIG
+        weight / body-composition measurements) then never deliver anything.
+        The notification callback registered by ``start_notify`` stays in place.
+        """
+        properties = {str(prop).lower() for prop in getattr(char, "properties", ())}
+        _LOGGER.debug("Characteristic %s properties: %s", uuid, sorted(properties))
+        if "indicate" not in properties or "notify" in properties:
+            return
+        cccd = None
+        try:
+            cccd = char.get_descriptor(CCCD_UUID)
+        except Exception:  # noqa: BLE001 - backends differ
+            pass
+        if cccd is None:
+            return
+        try:
+            await self._client.write_gatt_descriptor(cccd, b"\x02\x00")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Could not enable indications on %s: %s", uuid, err)
+        else:
+            _LOGGER.debug("Enabled indications on %s", uuid)
 
     def _on_notify(self, uuid: str, kind: str, data: bytes) -> None:
         if not p.has_notification_prefix(data):
