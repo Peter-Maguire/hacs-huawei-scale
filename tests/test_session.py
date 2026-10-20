@@ -199,3 +199,59 @@ async def test_notify_capable_or_cccd_less_characteristics_are_left_alone() -> N
     await session._prefer_indication(_IndicateOnlyChar(with_cccd=False), "y")
     await session._prefer_indication(object(), "z")  # no properties at all
     assert client.descriptor_writes == []
+
+
+class _FlakyNotifyClient:
+    """Refuses to subscribe to ``refused`` until ``allow`` is called."""
+
+    def __init__(self, refused: str) -> None:
+        self.refused = refused
+        self.allowed = False
+        self.subscribed: list[str] = []
+        self.services = _OneCharServices(refused)
+
+    def allow(self) -> None:
+        self.allowed = True
+
+    async def start_notify(self, char, callback) -> None:
+        if char.uuid == self.refused and not self.allowed:
+            raise RuntimeError("Application error")
+        self.subscribed.append(char.uuid)
+
+
+class _Char:
+    properties = ["notify"]
+
+    def __init__(self, uuid: str) -> None:
+        self.uuid = uuid
+
+
+class _OneCharServices:
+    def __init__(self, uuid: str) -> None:
+        self._char = _Char(uuid)
+
+    def get_service(self, _uuid: str):
+        return self
+
+    def get_characteristic(self, _uuid: str):
+        return self._char
+
+
+async def test_refused_subscription_is_retried_later() -> None:
+    from custom_components.huawei_scale3 import protocol as p
+
+    uuid = p.CHR_REALTIME_WEIGHT
+    client = _FlakyNotifyClient(uuid)
+    session = s.Scale3Session(client, ADDRESS, SECRETS, USER)
+    service, characteristic, kind = next(
+        item for item in p.NOTIFY_CHARACTERISTICS if item[1] == uuid
+    )
+
+    assert not await session._start_notify(service, characteristic, kind)
+    session._deferred.append((service, characteristic, kind))
+    await session._retry_deferred_subscriptions()
+    assert session._deferred and client.subscribed == []  # still refused
+
+    client.allow()
+    await session._retry_deferred_subscriptions()
+    assert session._deferred == [] and client.subscribed == [uuid]

@@ -28,6 +28,8 @@ from . import protocol as p
 
 _LOGGER = logging.getLogger(__name__)
 
+SUBSCRIBE_ATTEMPTS = 3
+SUBSCRIBE_RETRY_DELAY = 0.3
 AUTH_TIMEOUT = 8.0
 MANAGER_INFO_TIMEOUT = 2.5
 USER_INFO_ACK_TIMEOUT = 3.0
@@ -119,6 +121,7 @@ class Scale3Session:
         self._inbox: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
         self._backlog: deque[tuple[str, bytes]] = deque()
         self._manager_huid: str | None = None
+        self._deferred: list[tuple[str, str, str]] = []
         self._seen: dict[str, int] = {}
         self._last_status: int | None = None
         self.measurement_published = False
@@ -140,29 +143,61 @@ class Scale3Session:
     async def _subscribe(self) -> None:
         subscribed = 0
         for service, characteristic, kind in p.NOTIFY_CHARACTERISTICS:
-            char = self._characteristic(service, characteristic)
-            if char is None:
+            if self._characteristic(service, characteristic) is None:
                 continue
-
-            def _callback(_sender: Any, data: bytearray, _kind: str = kind,
-                          _uuid: str = characteristic) -> None:
-                self._on_notify(_uuid, _kind, bytes(data))
-
-            try:
-                await self._client.start_notify(char, _callback)
-            except Exception as err:  # noqa: BLE001
-                # Optional characteristics must not abort the session.
-                if kind in ("request_auth", "auth_token", "send_work_key"):
-                    raise SessionError(f"cannot subscribe to {kind}: {err}") from err
-                _LOGGER.debug("Skipping notifications for %s: %s", characteristic, err)
-                continue
-            subscribed += 1
-            await self._prefer_indication(char, characteristic)
+            if await self._start_notify(service, characteristic, kind):
+                subscribed += 1
+            else:
+                # The scale may refuse some subscriptions (GATT error 128) until
+                # it is in the right state; the app subscribes just before it
+                # writes to the characteristic, so try again at that point.
+                self._deferred.append((service, characteristic, kind))
         if not subscribed or self._characteristic(p.SVC_USER_DATA, p.CHR_REQUEST_AUTH) is None:
             raise SessionError(
                 "device does not expose the Huawei Hagrid GATT layout "
                 "(is this really a Huawei Scale 3?)"
             )
+
+    async def _start_notify(self, service: str, characteristic: str, kind: str) -> bool:
+        """Subscribe to one characteristic. Raises only for the auth ones."""
+        char = self._characteristic(service, characteristic)
+        if char is None:
+            return False
+
+        def _callback(_sender: Any, data: bytearray, _kind: str = kind,
+                      _uuid: str = characteristic) -> None:
+            self._on_notify(_uuid, _kind, bytes(data))
+
+        required = kind in ("request_auth", "auth_token", "send_work_key")
+        # A generic GATT error (e.g. 133) right after connecting is usually
+        # transient on proxies and adapters; the app itself retries too.
+        attempts = SUBSCRIBE_ATTEMPTS if required else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                await self._client.start_notify(char, _callback)
+                break
+            except Exception as err:  # noqa: BLE001
+                if attempt < attempts:
+                    _LOGGER.debug("Subscribing to %s failed (%s); retrying", characteristic, err)
+                    await asyncio.sleep(SUBSCRIBE_RETRY_DELAY)
+                    continue
+                # Optional characteristics must not abort the session.
+                if required:
+                    raise SessionError(f"cannot subscribe to {kind}: {err}") from err
+                _LOGGER.debug("Cannot subscribe to %s: %s", characteristic, err)
+                return False
+        await self._prefer_indication(char, characteristic)
+        return True
+
+    async def _retry_deferred_subscriptions(self) -> None:
+        """Retry the subscriptions the scale refused earlier."""
+        still_failing = []
+        for service, characteristic, kind in self._deferred:
+            if await self._start_notify(service, characteristic, kind):
+                _LOGGER.debug("Subscribed to %s on retry", characteristic)
+            else:
+                still_failing.append((service, characteristic, kind))
+        self._deferred = still_failing
 
     async def _prefer_indication(self, char: Any, uuid: str) -> None:
         """Switch an indicate-only characteristic from notify to indicate.
@@ -371,6 +406,7 @@ class Scale3Session:
 
     async def _measure(self) -> None:
         loop = asyncio.get_running_loop()
+        await self._retry_deferred_subscriptions()
         await self._write(p.SVC_BODY_COMPOSITION, p.CHR_REALTIME_WEIGHT, b"")
         # Identity reads, answered asynchronously and handled in the loop below.
         for service, characteristic in (
@@ -439,6 +475,7 @@ class Scale3Session:
                         self._publish(pending)
                         return
                     if final_requested_at is None:
+                        await self._retry_deferred_subscriptions()
                         await self._write(p.SVC_BODY_COMPOSITION, p.CHR_REALTIME_WEIGHT, b"")
                         final_requested_at = loop.time()
             else:
@@ -457,6 +494,7 @@ class Scale3Session:
         self._on_measurement(measurement, True)
 
     async def _drain_history(self) -> None:
+        await self._retry_deferred_subscriptions()
         if not await self._write(p.SVC_BODY_COMPOSITION, p.CHR_HISTORY_WEIGHT, b""):
             return
         for _ in range(MAX_HISTORY_RECORDS):
