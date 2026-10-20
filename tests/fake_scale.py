@@ -96,6 +96,7 @@ class FakeScale:
         self.user_info: bytes | None = None
         self.unbound = unbound  # no manager until SET_MANAGER_INFO is written
         self.manager_info: bytes | None = None
+        self.bind_request: bytes | None = None
         self.clock: bytes | None = None
         self.weight_unit: bytes | None = None
         self.polls = 0
@@ -193,6 +194,8 @@ class FakeScale:
                 self._notify(
                     uuid, b"HUID-FROM-SCALE".ljust(30, b"\x00") + b"DEVICE-1".ljust(40, b"\x00")
                 )
+        elif uuid == p.CHR_BIND_REQUEST:
+            self.bind_request = payload
         elif uuid == p.CHR_SET_MANAGER_INFO:
             self.manager_info = payload
             self._notify(uuid, b"\x00", encrypted=True)

@@ -392,6 +392,13 @@ def build_user_info_payload(
     return bytes(payload)
 
 
+def build_bind_request_payload(huid: str) -> bytes:
+    """30-byte BIND_REQUEST payload: the HUID of the account the scale is bound to."""
+    payload = bytearray(MANAGER_HUID_BYTES)
+    _put_fixed(payload, huid, 0, MANAGER_HUID_BYTES)
+    return bytes(payload)
+
+
 def build_manager_info_payload(huid: str, device_id: str) -> bytes:
     """70-byte SET_MANAGER_INFO payload (HUID, then device id) that binds a scale."""
     payload = bytearray(MANAGER_INFO_PAYLOAD_BYTES)

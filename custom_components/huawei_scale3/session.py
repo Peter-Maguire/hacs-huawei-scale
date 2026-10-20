@@ -420,6 +420,10 @@ class Scale3Session:
     async def _bind_scale(self) -> None:
         """Give an unbound scale a manager, as the Huawei app does when pairing.
 
+        Sends BIND_REQUEST (the account HUID) first, then SET_MANAGER_INFO.
+        Whatever the scale answers on the bind characteristic arrives as a
+        "realtime" message and is logged.
+
         An unbound scale (empty manager info) answers the user profile with
         status 01 and refuses the realtime subscription, so it never measures.
         Only done when the user opted in, since it changes the scale's state.
@@ -435,8 +439,14 @@ class Scale3Session:
         payload = p.build_manager_info_payload(
             huid, BIND_DEVICE_ID_PREFIX + self._address.replace(":", "").upper()
         )
-        frames = p.build_encrypted_write_frames(payload, self._work_key, self._random(16))
         _LOGGER.info("Binding the unbound scale to manager %s", huid)
+        bind_frames = p.build_encrypted_write_frames(
+            p.build_bind_request_payload(huid), self._work_key, self._random(16)
+        )
+        await self._write(
+            p.SVC_USER_DATA, p.CHR_BIND_REQUEST, b"", encrypted_frames=bind_frames
+        )
+        frames = p.build_encrypted_write_frames(payload, self._work_key, self._random(16))
         if not await self._write(
             p.SVC_USER_DATA, p.CHR_SET_MANAGER_INFO, b"", encrypted_frames=frames
         ):

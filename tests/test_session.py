@@ -270,6 +270,8 @@ async def test_unbound_scale_is_bound_when_enabled():
     scale = FakeScale(ADDRESS, SECRETS, unbound=True)
     out = await go(scale, bind_if_unbound=True)
 
+    assert scale.bind_request is not None and len(scale.bind_request) == 30
+    assert scale.bind_request.rstrip(b"\x00") == b"openscale:381EC76608D3"
     info = scale.manager_info
     assert info is not None and len(info) == 70
     assert info[:30].rstrip(b"\x00") == b"openscale:381EC76608D3"
